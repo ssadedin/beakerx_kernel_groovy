@@ -101,8 +101,8 @@ public class GroovyAutocomplete extends AutocompleteServiceBeakerx {
       q.addAll(extractor3.getQuery());
     List<String> ret = registry.searchCandidates(q);
     
-	List<String> reflectionCompletions = extractor4.autocomplete(txt, cur);
-	ret.addAll(reflectionCompletions);
+    List<String> reflectionCompletions = extractor4.autocomplete(txt, cur);
+    ret.addAll(reflectionCompletions);
 
     if (!ret.isEmpty()) {
       return new AutocompleteResult(ret, getStartIndex(extractor, extractor2, extractor3));
