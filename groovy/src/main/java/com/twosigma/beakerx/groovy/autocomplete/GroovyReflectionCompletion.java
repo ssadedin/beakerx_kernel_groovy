@@ -15,25 +15,26 @@ package com.twosigma.beakerx.groovy.autocomplete;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.StringTokenizer;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.lang.reflect.Parameter;
+import java.util.*;
+import java.util.regex.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-import org.apache.commons.beanutils.BeanUtilsBean2;
 import org.apache.commons.beanutils.PropertyUtils;
 import org.apache.commons.lang3.StringUtils;
 
+import com.twosigma.beakerx.autocomplete.AutocompleteResult;
 import com.twosigma.beakerx.kernel.Imports;
 
 import groovy.lang.Binding;
 
+/**
+ * Support to autocomplete editor contents based on runtime discovery of compatible
+ * extensions using reflection.
+ * 
+ * @author simon.sadedin
+ */
 public class GroovyReflectionCompletion {
   
   Binding binding;
@@ -42,8 +43,6 @@ public class GroovyReflectionCompletion {
   
   Imports imports;
 
-  private BeanUtilsBean2 beanUtils = new BeanUtilsBean2();
-  
   private Pattern indexedAccessPattern = Pattern.compile("(.*)\\[([0-9]{1,})\\]");
   
   public GroovyReflectionCompletion(Binding binding, ClassLoader classLoader, Imports imports) {
@@ -52,9 +51,9 @@ public class GroovyReflectionCompletion {
     this.imports = imports;
   }
 
-  public List<String> autocomplete(String text, int pos) {
+  public AutocompleteResult autocomplete(String text, int pos) {
     
-    List<String> constructorResults = null;
+    AutocompleteResult constructorResults = null;
     try {
       constructorResults = tryResolveConstructor(text, pos);
     } catch (ClassNotFoundException e) {
@@ -62,7 +61,7 @@ public class GroovyReflectionCompletion {
       e.printStackTrace();
     }
 
-    List<String> expressionResults = null;
+    AutocompleteResult expressionResults = null;
     try {
       expressionResults = this.autocompleteExpression(text, pos);
     } catch (Exception e) {
@@ -70,16 +69,21 @@ public class GroovyReflectionCompletion {
       e.printStackTrace();
     }
     
-    List<String> allResults = new ArrayList<String>();
+    AutocompleteResult allResults = new AutocompleteResult(new ArrayList<>(), pos);
     if(constructorResults != null)
-      allResults.addAll(constructorResults);
-    if(expressionResults != null)
-      allResults.addAll(expressionResults);
+      allResults = allResults.append(constructorResults);
+    if(expressionResults != null) {
+      allResults = allResults.append(expressionResults);
+      allResults.setStartIndex(expressionResults.getStartIndex());
+    }
+    
     return allResults;
   }
     
-  public List<String> autocompleteExpression(String text, int pos) {
+  public AutocompleteResult autocompleteExpression(String text, int pos) {
     String expr = resolveExpression(text,pos-1);
+
+    int replacementStartIndex = Math.min(text.length(), findReplacementStartPosition(text, pos-1)+1);
     
     ArrayList<String> parts = new ArrayList<String>();
     StringTokenizer tokenizer = new StringTokenizer(expr, ".");
@@ -87,7 +91,7 @@ public class GroovyReflectionCompletion {
       parts.add(tokenizer.nextToken());
     }
     
-    if(text.endsWith("."))
+    if(expr.endsWith("."))
       parts.add("");
     
     String bindingReference = parts.get(0);
@@ -96,8 +100,8 @@ public class GroovyReflectionCompletion {
       bindingReference = m.group(1);
     }
   
-    if(binding.hasVariable(bindingReference) && ((parts.size() > 1) || text.endsWith("."))) {
-      return autocompleteFromObject(parts);
+    if(binding.hasVariable(bindingReference) && ((parts.size() > 1))) {
+      return autocompleteFromObject(parts, replacementStartIndex, pos);
     }
     else  {
       List<String> result = 
@@ -105,8 +109,10 @@ public class GroovyReflectionCompletion {
                       .keySet()
                       .stream()
                       .filter(x -> x.startsWith(expr))
+                      .filter(x -> !x.equals(expr))
                       .collect(Collectors.toList());
-      return result;
+
+      return new AutocompleteResult(result, replacementStartIndex);
     }
   }
   
@@ -127,22 +133,13 @@ public class GroovyReflectionCompletion {
     public List<String> computeConstructorCompletions() throws ClassNotFoundException {
 
       Class clazz = findClassMatch();
-      
-      System.out.println("Loaded class " + clazz);
-    
       ArrayList<String> result = new ArrayList<String>();
       getClassMutablePropertyNames(clazz).forEach(prop -> {
-        String completion = null;
         if(this.propName != null && !this.propName.isEmpty()) {
           if(!prop.startsWith(this.propName))
             return;
-          completion = text.substring(0,pos-propName.length()) + prop + ": ";
-        }         
-        else {
-          completion = text.substring(0,pos) + prop + ": ";
         }
-        
-        result.add(completion);
+        result.add(prop + ": ");
       });
       
       return result;
@@ -190,14 +187,14 @@ public class GroovyReflectionCompletion {
     }
   }
 
-  public List<String> tryResolveConstructor(String text, int pos) throws ClassNotFoundException {
+  public AutocompleteResult tryResolveConstructor(String text, int pos) throws ClassNotFoundException {
     
     ConstructorMatch match = tryMatchConstructor(text, pos);
     if(match == null) {
       return null;
     }
     else {
-      return match.computeConstructorCompletions();
+      return new AutocompleteResult(match.computeConstructorCompletions(), pos);
     }
   }
 
@@ -229,28 +226,23 @@ public class GroovyReflectionCompletion {
    */
   public String resolveExpression(String text, int pos) {
     
-    int expressionEnd = findExpressionEnd(text, pos);
-    
+    int expressionEnd = pos + 1;
     int expressionStart = findExpressionStart(text, pos);
-    
-    if(expressionStart == expressionEnd) {
-      return null;
-    }
     
     expressionStart = Math.max(0,expressionStart);
     expressionEnd = Math.min(text.length(),expressionEnd);
     
     String result = text.substring(expressionStart, expressionEnd).trim();
     
-    if(!Character.isJavaIdentifierPart(result.charAt(result.length()-1))) {
+    char lastChar = result.charAt(result.length()-1);
+    if(lastChar != '.' && !Character.isJavaIdentifierPart(lastChar)) {
       result = result.substring(0, result.length()-1);
     }
     
     if(!Character.isJavaIdentifierPart(result.charAt(0))) {
       result = result.substring(1);
     }
-    
-//    System.out.println("Expression is " + result);
+
     return result;
   }
 
@@ -288,42 +280,25 @@ public class GroovyReflectionCompletion {
     return pos;
   }
 
-  private int findExpressionEnd(String text, int startPos) {
-    
-    List<Character> bracketStack = new ArrayList<Character>();
-
+  /**
+   * Returns the index of the first char that would be replaced by a candidate for 
+   * autocomplete, ie: outside the expression to be evaluated and any non-identifier 
+   * chars.
+   * 
+   * @param text                full text of cell containing code
+   * @param startPos            position within cell to scan
+   * @return index of the first char that would be replaced by a candidate
+   */
+  public int findReplacementStartPosition(String text, int startPos) {
     int pos = startPos;
-    while(pos < text.length()) {
+    while(pos >= 0) {
       final char c  = text.charAt(pos);
-      
-      if(c == '\n') {
+      if(!Character.isJavaIdentifierPart(c)) {
         break;
       }
-      if(c == '.') {
-        // allow
-      }
-      else
-      if(Character.isJavaIdentifierPart(c)) {
-        // allow
-      }
-      else
-      if(c == ']') {
-        bracketStack.add(c);
-      }
-      else
-      if(c == '[') {
-        if(!bracketStack.isEmpty() && bracketStack.get(bracketStack.size()-1) == ']') {
-          bracketStack.remove(bracketStack.size()-1);
-        }
-        else
-          break;
-      }
-      else
-        break;
-      ++pos;
+      --pos;
     }
-    return pos;
-    
+    return Math.max(0, pos);
   }
   
   /**
@@ -348,18 +323,13 @@ public class GroovyReflectionCompletion {
       "contains("
   );
   
-  List<String> autocompleteFromObject(List<String> parts) {
+  AutocompleteResult autocompleteFromObject(List<String> parts, int replacementStartIndex, int pos) {
     
     List<String> lowPriorityCompletions = Arrays.asList("class","metaClass");
-
     List<String> filteredCompletions = Arrays.asList("empty");
-    
     List<String> iterableOnlyCompletions = Arrays.asList("join(");
 
-  
-  
-    ArrayList<String> result = new ArrayList<String>();
-    
+    AutocompleteResult result = new AutocompleteResult(replacementStartIndex);
     try {
 
       String bindingReference = parts.get(0);
@@ -376,8 +346,6 @@ public class GroovyReflectionCompletion {
       int i = 1;
       for(; i<parts.size()-1; ++i) {
         String partExpr = parts.get(i);
-        
-        
         Matcher m2 = indexedAccessPattern.matcher(partExpr);
         if(m2.matches()) {
           value = PropertyUtils.getIndexedProperty(value, partExpr);
@@ -389,7 +357,7 @@ public class GroovyReflectionCompletion {
         if(value == null) {
           // We can't complete anything on it
           // TODO: we could complete on the static type one day
-          return result;
+          return new AutocompleteResult(replacementStartIndex);
         }
       }
       
@@ -399,13 +367,21 @@ public class GroovyReflectionCompletion {
       
       List<String> lowPri = new ArrayList<String>();
     
+      final Object resolvedValue = value;
       properties.forEach((String key) -> {
         if(key.startsWith(completionToken)) {
           if(lowPriorityCompletions.contains(key)) {
             lowPri.add(key);
           }
           else {
-            result.add(key);
+            try {
+              var propClass = PropertyUtils.getPropertyType(resolvedValue, key);
+              var typeInfo = propClass != null ? ("Property: " + propClass.getSimpleName()) : "";
+              result.add(key, typeInfo);
+            } 
+            catch (IllegalAccessException | InvocationTargetException | NoSuchMethodException e) {
+              result.add(key);
+            }
           }
         }
       });
@@ -413,27 +389,27 @@ public class GroovyReflectionCompletion {
       if(value instanceof Map) {
         Map<String,?> mapValue = (Map<String,?>)value;
         mapValue.keySet().stream()
-                 .filter(k -> k.startsWith(completionToken))
-                 .forEach(k -> result.add(k));
+                .filter(k -> k.startsWith(completionToken))
+                .forEach(k -> {
+                  Object v = mapValue.get(k);
+                  result.add(k, "Map entry: " + v.getClass().getSimpleName()); 
+                });
       }
       
       if(value instanceof Iterable || value instanceof Map) {
-        result.addAll(SUPPLEMENTARY_COLLECTION_COMPLETIONS);
-        result.addAll(iterableOnlyCompletions);
+        result.addAll(SUPPLEMENTARY_COLLECTION_COMPLETIONS, "Groovy built in collection functions");
+        result.addAll(iterableOnlyCompletions, "Groovy built in iterable functions");
       }
       
       if(value instanceof String) {
-        result.addAll(STRING_COMPLETIONS);
+        result.addAll(STRING_COMPLETIONS, "String");
       }
       
-//      result.addAll(lowPri);
-      
-      result.removeIf(v -> !v.startsWith(completionToken));
-        
-      result.removeAll(filteredCompletions);
+      result.removeIf(v -> !v.match.startsWith(completionToken));
+      result.removeIf(v -> filteredCompletions.contains(v.match));
       
       // Finally, add method names
-      result.addAll(getObjectMethodCompletions(value, completionToken));
+      result.append(getObjectMethodCompletions(value, replacementStartIndex, completionToken));
   
     } catch (IllegalAccessException | InvocationTargetException | NoSuchMethodException e) {
       e.printStackTrace();
@@ -482,16 +458,48 @@ public class GroovyReflectionCompletion {
     return properties;
   }
   
-  String formatMethod(Method m) {
-    return m.getName() + "("  
-        + Stream.of(m.getParameters())
-              .map(x -> x.getType()
-                   .getName()
-                         .replaceAll("java.lang.","")
-                         .replaceAll("java.util.","")
-                         .replaceAll("groovy.lang.",""))
-              .collect(Collectors.joining(",")) 
-    + ")";
+  AutocompleteResult.MatchInfo formatMethod(Method m) {
+    
+    List<Parameter> parameters = Arrays.asList(m.getParameters());
+    
+    // If the last item is a closure, leave it off and append closure brace at end
+    boolean hasTrailingClosure = false;
+    if(parameters.size()>0) {
+      Parameter lastParameter = parameters.get(parameters.size()-1);
+      if(lastParameter.getType().getSimpleName().equals("Closure")) {
+        parameters = parameters.subList(0, parameters.size()-1);
+        hasTrailingClosure = true;
+      }
+    }
+    
+    String types = parameters.stream()
+              .map((Parameter x) -> { 
+                String argType = 
+                    sanitizeTypeName(x.getType().getName());
+                     return argType;
+              })
+              .collect(Collectors.joining(", "));
+    
+    String names = 
+        parameters.stream()
+        .map(p -> p.getName())
+        .collect(Collectors.joining(","));
+         
+    String returnType = sanitizeTypeName(m.getReturnType().getName());
+
+    String signature = String.format("function: (%s) -> %s", types, returnType);
+    String closureFragment = hasTrailingClosure ? " { " : "";
+    String openParen = "(";
+    String closeParen = ")";
+    if(hasTrailingClosure && parameters.isEmpty()) {
+      openParen="";
+      closeParen="";
+    }
+    
+    if(Stream.of(m.getParameters()).allMatch(p -> p.isNamePresent())) {
+      return new AutocompleteResult.MatchInfo(m.getName() + openParen + names + closeParen + closureFragment,signature);
+    }
+    return new AutocompleteResult.MatchInfo(m.getName() + openParen + types + closeParen + closureFragment, signature);
   }
   
   public static final List<String> IGNORE_METHODS = 
@@ -519,21 +527,29 @@ public class GroovyReflectionCompletion {
     return true;
   }
   
-  List<String> getObjectMethodCompletions(Object obj, String completionToken) {
+  AutocompleteResult getObjectMethodCompletions(final Object obj, final int replacementStartIndex, final String completionToken) {
     
     @SuppressWarnings("rawtypes")
     Class c = obj.getClass();
 
-    List<String> methodNames = 
-      Stream.of(c.getMethods())
+    AutocompleteResult result = new AutocompleteResult(replacementStartIndex);
+    Stream.of(c.getMethods())
           .filter(m -> 
             isNonPropertyMethod(m) &&
             !IGNORE_METHODS.contains(m.getName()))
           .filter(m -> m.getName().startsWith(completionToken))
-          .map(m -> {
-            return formatMethod(m);
-          })
-          .collect(Collectors.toList());
-    return methodNames;
+          .forEach( m -> {
+            var matchInfo  = formatMethod(m);
+            result.add(matchInfo.match, matchInfo.typeInfo);
+          });
+    
+    return result;
+  }
+  
+  String sanitizeTypeName(String name) {
+    return name.replaceAll("java.lang.","")
+        .replaceAll("java.util.","")
+        .replaceAll("java.io.","")
+        .replaceAll("groovy.lang.","");
   }
 }

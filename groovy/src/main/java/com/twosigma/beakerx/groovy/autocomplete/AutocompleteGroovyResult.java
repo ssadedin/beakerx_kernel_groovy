@@ -22,6 +22,10 @@ import org.antlr.v4.runtime.ParserRuleContext;
 
 public class AutocompleteGroovyResult extends AutocompleteResult {
 
+  public AutocompleteGroovyResult(List<String> matches, int startIndex, List<String> typeInfos) {
+    super(matches, startIndex, typeInfos);
+  }
+
   public AutocompleteGroovyResult(List<String> matches, int startIndex) {
     super(matches, startIndex);
   }
