@@ -27,7 +27,9 @@ import com.twosigma.beakerx.evaluator.TempFolderFactory;
 import com.twosigma.beakerx.evaluator.TempFolderFactoryImpl;
 import com.twosigma.beakerx.groovy.autocomplete.GroovyAutocomplete;
 import com.twosigma.beakerx.groovy.autocomplete.GroovyClasspathScanner;
+import com.twosigma.beakerx.inspect.CodeParsingTool;
 import com.twosigma.beakerx.inspect.Inspect;
+import com.twosigma.beakerx.inspect.InspectResult;
 import com.twosigma.beakerx.jvm.classloader.BeakerXUrlClassLoader;
 import com.twosigma.beakerx.jvm.object.EvaluationObject;
 import com.twosigma.beakerx.jvm.threads.BeakerCellExecutor;
@@ -41,8 +43,11 @@ import com.twosigma.beakerx.kernel.PathToJar;
 import groovy.lang.Binding;
 import groovy.lang.GroovyClassLoader;
 import org.codehaus.groovy.control.customizers.ImportCustomizer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.File;
+import java.util.StringTokenizer;
 import java.util.concurrent.Executors;
 
 import static com.twosigma.beakerx.groovy.evaluator.EnvVariablesFilter.envVariablesFilter;
@@ -53,6 +58,7 @@ import static com.twosigma.beakerx.groovy.evaluator.GroovyClassLoaderFactory.new
 
 public class GroovyEvaluator extends BaseEvaluator {
 
+  Logger log = LoggerFactory.getLogger(GroovyEvaluator.class);
 
   private GroovyClassLoader groovyClassLoader;
   private Binding scriptBinding = null;
@@ -152,6 +158,41 @@ public class GroovyEvaluator extends BaseEvaluator {
     cpp += File.pathSeparator;
     cpp += System.getProperty("java.class.path");
     return cpp;
+  }
+  
+  @Override
+  public InspectResult inspect(String code, int caretPosition) {
+    try {
+      InspectResult inspectResult = super.getInspect().doInspect(code, caretPosition, null, imports);
+      if(inspectResult.getFound())
+        return inspectResult;
+
+      log.info("No inspection result from static analysis for " + code + " at position " + caretPosition + ": attempting dynamic analysis");
+
+      String methodName = CodeParsingTool.getSelectedMethodName(code, caretPosition);
+      String className = CodeParsingTool.getClassName(code, caretPosition, methodName);
+
+      log.info("Attempting to resolve information for " + className + " : " + methodName);
+      if(className != null) {
+        Object variable = this.scriptBinding.getVariables().get(className);
+        if(variable != null) {
+          Class clazz = variable.getClass();
+          if(methodName != null) {
+            StringTokenizer tokenizer = new StringTokenizer(methodName);
+            if(tokenizer.hasMoreTokens()) {
+              methodName = tokenizer.nextToken();
+            }
+          }
+          return ((BxInspect)super.getInspect()).getInspectResult(caretPosition, methodName, clazz.getSimpleName()); 
+        }
+      }
+
+      return inspectResult;
+    }
+    catch(Exception e) {
+      log.error("Exception while generating inspect result", e);
+      return new InspectResult();
+    }
   }
 
   @Override
