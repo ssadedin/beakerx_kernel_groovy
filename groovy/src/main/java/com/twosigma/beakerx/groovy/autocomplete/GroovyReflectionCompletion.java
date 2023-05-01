@@ -281,9 +281,20 @@ public class GroovyReflectionCompletion {
   }
 
   /**
-   * Returns the index of the first char that would be replaced by a candidate for 
+   * Returns the index of the first char that should not replaced by a candidate for 
    * autocomplete, ie: outside the expression to be evaluated and any non-identifier 
    * chars.
+   * 
+   * Example:
+   * <pre>
+   * $hel
+   * ^
+   * </pre>
+   * 
+   * <pre>
+   * x.hel
+   *  ^
+   * </pre>
    * 
    * @param text                full text of cell containing code
    * @param startPos            position within cell to scan
@@ -298,7 +309,7 @@ public class GroovyReflectionCompletion {
       }
       --pos;
     }
-    return Math.max(0, pos);
+    return Math.max(-1, pos);
   }
   
   /**
